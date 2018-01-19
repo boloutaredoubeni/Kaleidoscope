@@ -1,0 +1,8 @@
+framework: auto-detect
+storage: none
+source https://www.nuget.org/api/v2
+
+nuget FSharp.Core ~> 4.1.0
+nuget LLVMSharp
+nuget FParsec
+
