@@ -2,14 +2,24 @@
 open System
 open System.IO
 
-module AST = 
+module Token =
+  let [<Literal>] Plus = "+"
+  let [<Literal>] Minus = "-"
+  let [<Literal>] Multiply = "*"
+  let [<Literal>] LessThan = "<"
+  let [<Literal>] LeftParen = "("
+  let [<Literal>] RightParen = ")"
+  let [<Literal>] Comma = ","
+  let [<Literal>] SpecialCharacters = "!%&*+-./<=>@^|~?"
+
+module rec AST = 
 
   (* expr - Base type for all expression nodes. *)
   type Expr =
     (* variant for numeric literals like "1.0". *)
     | Number of double
     (* variant for a binary operator. *)
-    | BinaryOperation of Op: string * Lhs: Expr * Rhs: Expr
+    | BinaryOperation of Op: Operator * Lhs: Expr * Rhs: Expr
     (* variant for referencing a variable, like "a". *)
     | Variable of Name: string
     (* variant for function calls. *)
@@ -19,7 +29,29 @@ module AST =
       match expr with
       | BinaryOperation (Op=op; Lhs=lhs; Rhs=rhs) -> sprintf "%A %A %A" lhs op rhs
       | Number n -> sprintf "%A : Number" n
-      | _ -> string expr
+      | Variable identifier -> sprintf "%s : Variable" identifier 
+      | Call(FunctionName=fn;Arguments=args) ->
+        let argRepresentation =
+          args
+          |> Seq.map string
+          |> String.concat ", "
+        sprintf "Call %s (%s)" fn argRepresentation
+  
+  type Operator =
+    | Plus
+    | Minus
+    | LessThan
+    | Multiply
+
+    member op.Code =
+      match op with
+      | Plus -> Token.Plus
+      | Minus -> Token.Minus
+      | LessThan -> Token.LessThan
+      | Multiply -> Token.Multiply
+
+    override op.ToString() = op.Code
+
 
   (* proto - This type represents the "prototype" for a function, which captures
    * its name, and its argument names (thus implicitly the number of arguments the
@@ -29,50 +61,100 @@ module AST =
   (* func - This type represents a function definition itself. *)
   type Function = Function of Prototype: Prototype * Body: Expr
 
+module Lexer =
+  open FParsec
+  open Token
+  
+  let parseLeftParen = pstring LeftParen
+
+  let parseRightParen = pstring RightParen
+
+  let parseComma = pstring Comma
+  let isSymbolicOperatorChar = isAnyOf SpecialCharacters
+  let remainingOperatorCharsAndWhiteSpace = manySatisfy isSymbolicOperatorChar .>> spaces
+
+  let parseWhiteSpace = spaces
+
+  let parseBetweenBrackets = between parseLeftParen parseRightParen
+
 module Parser =
   open FParsec
   open AST
+  open Lexer
+
+  type private AST.Operator with
+  
+    member op.Precedence =
+      match op with
+      | Plus -> 20
+      | LessThan -> 10
+      | Minus -> 30
+      | Multiply -> 40
+
+    member op.Associativity =
+      match op with
+      | Plus -> Associativity.Left
+      | _ -> Associativity.Left
 
   type UserState = unit
 
-  let parseNumber : Parser<Expr, UserState> = pfloat |>> Number
+  let parseExpr, parseExprRef = createParserForwardedToRef<Expr, _>()
 
-  let isSymbolicOperatorChar = isAnyOf "!%&*+-./<=>@^|~?"
-  let remainingOperatorCharsAndWhiteSpace = manySatisfy isSymbolicOperatorChar .>> spaces
+  let parseValue =
+
+    let parseNumber : Parser<Expr, UserState> = pfloat .>> spaces |>> Number
+
+    let parseVariable : Parser<Expr, UserState> = 
+      let options = IdentifierOptions()
+      let parseIdentifierWithOptions = identifier options
+      parseIdentifierWithOptions .>> spaces |>> Variable
+
+    let parseCall =
+      let parseArgs =
+        let parseExprs = sepBy parseExpr parseComma
+        between parseLeftParen parseRightParen parseExprs
+      let operator = parseVariable
+      operator .>>. parseArgs |>> (fun (fn, args) -> 
+        let (Variable name) = fn
+        Call(name, args)
+      )
+
+    choice [
+      parseNumber
+      attempt parseCall
+      attempt parseVariable
+    ]
   
-  let addSymbolicInfixOperators prefix precendence associativity opp =
+  let addSymbolicInfixOperators (op : Operator) opp =
     let operator = 
       InfixOperator(
-        prefix,
+        op.Code,
         remainingOperatorCharsAndWhiteSpace,
-        precendence,
-        associativity,
+        op.Precedence,
+        op.Associativity,
         (),
-        fun remainingOperatorChars lhs rhs ->
-          BinaryOperation(prefix + remainingOperatorChars, lhs, rhs)
+        fun _ lhs rhs ->
+          BinaryOperation(op, lhs, rhs)
     )
     (opp : OperatorPrecedenceParser<_, _, _>).AddOperator(operator)
   
   let operatorPrecendenceParser = 
+    let parseTerm = 
+      parseValue .>> parseWhiteSpace
+      <|> parseBetweenBrackets parseExpr
     let opp = OperatorPrecedenceParser()
     do 
-      opp.TermParser <- pfloat .>> spaces |>> Number
-      addSymbolicInfixOperators "<" 10 Associativity.Left opp
-      addSymbolicInfixOperators "+" 20 Associativity.Left opp
-      addSymbolicInfixOperators "-" 30 Associativity.Left opp
-      addSymbolicInfixOperators "*" 40 Associativity.Left opp
+      opp.TermParser <- parseTerm
+      addSymbolicInfixOperators LessThan opp
+      addSymbolicInfixOperators Plus opp
+      addSymbolicInfixOperators Minus opp
+      addSymbolicInfixOperators Multiply opp
     opp
-  
 
   let parseBinaryOperation = operatorPrecendenceParser.ExpressionParser
 
-  let parsePrimary : Parser<Expr, _> = parseNumber
-
-  let parser =
-    choice [
-      parseBinaryOperation
-      // parsePrimary
-    ]
+  do parseExprRef := parseBinaryOperation
+       
   let showResult = 
     function
     | Success(result, _, _) ->
@@ -86,7 +168,7 @@ module Parser =
         printfn "☠️ %s" message
         printfn ""
 
-  let run = runParserOnString parser () "" 
+  let run = runParserOnString parseExpr () "" 
 
 module Driver =
 
@@ -95,11 +177,10 @@ module Driver =
 
   // Read user input until an empty line with a return
   // TODO: pass in a reader or see if fparsec has stdin support
-  let readLines (scanner: TextReader) =
+  let readLines scanner =
     let rec readLinesIntoSeqAsync lines =
-      // TODO: parse asynchronously and parser in the background
       async {
-        let! nextLine = scanner.ReadLineAsync() |> Async.AwaitTask
+        let! nextLine = (scanner: TextReader).ReadLineAsync() |> Async.AwaitTask
         if String.IsNullOrEmpty(nextLine) 
           then return seq lines
           else
@@ -133,6 +214,17 @@ open LLVMSharp
 
 let [<Literal>] ``my-cool-jit`` = "my cool jit"
 
+let tests () = 
+  [
+    "1.0"
+    "variable"
+    "45 + 3.0"
+    "s < 3"
+    "foo(y, 4.0 + z)"
+  ] 
+  |> Seq.iter (fun program -> Driver.run (new StringReader(program)))
+
+
 [<EntryPoint>]
 let main _ = 
   do 
@@ -140,6 +232,7 @@ let main _ =
     let builder = LLVM.CreateBuilder()
 
     (* Run the main "interpreter loop" now. *)
+    // tests ()
     Driver.run Console.In
     LLVM.DumpModule(module')
   0
