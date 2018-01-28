@@ -30,7 +30,7 @@ module rec AST =
 
     override expr.ToString() =
       match expr with
-      | BinaryOperation (op, lhs, rhs) -> sprintf "%s %s %s" (lhs.ToString()) (string op) (rhs.ToString())
+      | BinaryOperation (op, lhs, rhs) -> sprintf "%O %O %O" lhs op rhs
       | Number n -> sprintf "%f" n
       | Variable identifier -> sprintf "%s" identifier 
       | Call(fn, args) ->
@@ -73,7 +73,7 @@ module rec AST =
       match decl with
       | Prototype (name, args) -> prototypeToString (name, args)
       | Function (prototype, body) ->
-        sprintf "%s %s" (prototypeToString prototype) (body.ToString())
+        sprintf "%s %O" (prototypeToString prototype) body
 
 module Lexer =
   open FParsec
@@ -215,7 +215,7 @@ module Parser =
     | Success(result, _, _) ->
       do
         printfn ""
-        printfn "=> %s" (string result)
+        printfn "=> %O" result
         printfn ""
     | Failure(message, _, _) ->
       do 
@@ -256,8 +256,7 @@ module Driver =
         do 
           printf "%s" prompt
           let lines = readLines scanner
-          if String.IsNullOrWhiteSpace(lines)
-            then runRepl ()
+          if String.IsNullOrWhiteSpace(lines) then runRepl ()
           let result = Parser.run lines
           Parser.showResult result
           runRepl ()
@@ -266,7 +265,7 @@ module Driver =
 open LLVMSharp
 open FParsec
 
-let [<Literal>] ``my-cool-jit`` = "my cool jit"
+let [<Literal>] JitName = "my cool jit"
 
 let tests () = 
   [
@@ -285,15 +284,48 @@ let tests () =
   |> Async.Parallel
   |> Async.RunSynchronously
 
+let module' = LLVM.ModuleCreateWithName(JitName)
+let builder = LLVM.CreateBuilder()
+let engine = ref (LLVMExecutionEngineRef(IntPtr.Zero))
 
 [<EntryPoint>]
 let main _ = 
   do 
-    let module' = LLVM.ModuleCreateWithName(``my-cool-jit``)
-    let builder = LLVM.CreateBuilder()
+    LLVM.LinkInMCJIT()
+    LLVM.InitializeX86TargetInfo()
+    LLVM.InitializeX86Target()
+    LLVM.InitializeX86TargetMC()
+  let mutable message = ""
+  if 1 = (LLVM.CreateExecutionEngineForModule(engine, module', &message)).Value 
+    then 
+      printfn "%s" message
+      1
+    else
+      let passManager = LLVM.CreateFunctionPassManagerForModule(module')
+      // Provide basic AliasAnalysis support for GVN.
+      LLVM.AddBasicAliasAnalysisPass(passManager)
 
-    (* Run the main "interpreter loop" now. *)
-    tests () |> ignore
-    Driver.run Console.In
-    LLVM.DumpModule(module')
-  0
+      // Promote allocas to registers.
+      LLVM.AddPromoteMemoryToRegisterPass(passManager)
+
+      // Do simple "peephole" optimizations and bit-twiddling optzns.
+      LLVM.AddInstructionCombiningPass(passManager)
+
+      // Reassociate expressions.
+      LLVM.AddReassociatePass(passManager)
+
+      // Eliminate Common SubExpressions.
+      LLVM.AddGVNPass(passManager)
+
+      // Simplify the control flow graph (deleting unreachable blocks, etc).
+      LLVM.AddCFGSimplificationPass(passManager)
+
+      ignore <| LLVM.InitializeFunctionPassManager(passManager)
+      (* Run the main "interpreter loop" now. *)
+      ignore <| tests ()
+      Driver.run(Console.In)
+      LLVM.DumpModule(module')
+      LLVM.DisposeModule(module')
+      LLVM.DisposeExecutionEngine(!engine)
+      LLVM.DisposePassManager(passManager)
+      0
