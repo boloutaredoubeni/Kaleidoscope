@@ -264,6 +264,7 @@ module Driver =
 
 open LLVMSharp
 open FParsec
+open System.Reflection.Metadata.Ecma335
 
 let [<Literal>] JitName = "my cool jit"
 
@@ -284,9 +285,83 @@ let tests () =
   |> Async.Parallel
   |> Async.RunSynchronously
 
-let module' = LLVM.ModuleCreateWithName(JitName)
-let builder = LLVM.CreateBuilder()
+let context = LLVM.GetGlobalContext()
+let module' = LLVM.ModuleCreateWithNameInContext(JitName, context)
+let builder = LLVM.CreateBuilderInContext(context)
 let engine = ref (LLVMExecutionEngineRef(IntPtr.Zero))
+
+module Codegen =
+
+  open AST
+  open LLVMSharp
+
+  let rec codegenExpr (namedValues: Map<string, LLVMValueRef>) =
+    function
+    | Number n -> LLVM.ConstReal(LLVM.DoubleType(), n)
+    | Variable name ->
+      match namedValues.TryFind(name) with
+      | Some llvmValue -> llvmValue
+      | _ -> failwithf "unknown variable %s" name
+    | BinaryOperation (op, lhs, rhs) -> 
+      let lhs = codegenExpr namedValues lhs
+      let rhs = codegenExpr namedValues rhs
+      match op with
+      | Plus -> LLVM.BuildAdd(builder, lhs, rhs, "addtmp")
+      | Minus -> LLVM.BuildSub(builder, lhs, rhs, "subtmp")
+      | Multiply -> LLVM.BuildMul(builder, lhs, rhs, "multmp")
+      | LessThan ->
+        LLVM.BuildUIToFP(builder, LLVM.BuildFCmp(builder, LLVMRealPredicate.LLVMRealULT, lhs, rhs, "cmptmp"), LLVM.DoubleType(), "booltmp");
+    | Call (functionName, arguments) ->
+      let calleeF = 
+        let calleeF = LLVM.GetNamedFunction(module', functionName)
+        if calleeF.Pointer <> IntPtr.Zero then failwithf "Unknown function %s referenced" functionName
+        let argumentCount = (uint32 << Seq.length) arguments
+        if LLVM.CountParams(calleeF) <> argumentCount then failwith "Incorrect # of arguments passed"
+        calleeF
+      let argsV = 
+        let n = Math.Max((Seq.length arguments), 1)
+        let argsV = Array.zeroCreate n
+        let argsV = Seq.map2 (fun expr _valueRef -> codegenExpr namedValues expr) arguments argsV
+        Seq.toArray argsV
+      LLVM.BuildCall(builder, calleeF, argsV, "calltmp")
+
+  let rec codegenDecl (namedValues: Map<string, LLVMValueRef>) =
+    function
+    | Prototype (name, arguments) -> 
+      let argumentCount = (uint32 << Seq.length) arguments
+      let mutable function' = LLVM.GetNamedFunction(module', name)
+      if (function'.Pointer <> IntPtr.Zero)
+        then 
+          if LLVM.CountBasicBlocks(function') <> 0u then failwithf "redefinition of function %s" name
+          if LLVM.CountParams(function') <> argumentCount then failwithf "redefinition of function %s with a different # of args" name
+        else 
+          let arguments =
+            let n = Math.Max(int argumentCount, 1)
+            Array.create n (LLVM.DoubleType())
+          function' <-
+            let functionType = LLVM.FunctionType(LLVM.DoubleType(), arguments, false) 
+            LLVM.AddFunction(module', name, functionType)
+          LLVM.SetLinkage(function', LLVMLinkage.LLVMExternalLinkage)
+      let mutable namedValues = namedValues
+      Seq.iteri (fun i argumentName -> 
+        let param = LLVM.GetParam(function', uint32 i)
+        LLVM.SetValueName(param, argumentName)
+        namedValues <- namedValues.Add(argumentName, param)
+      ) arguments
+      function', namedValues
+    | Function (proto, body) ->
+      let namedValues = Map.empty
+      let (function', namedValues) = codegenDecl namedValues (Prototype proto)
+      LLVM.PositionBuilderAtEnd(builder, LLVM.AppendBasicBlock(function', "entry"))
+      let body = 
+        try
+          codegenExpr namedValues body
+        with _ ->
+          LLVM.DeleteFunction(function')
+          reraise ()
+      LLVM.BuildRet(builder, body) |> ignore
+      LLVM.VerifyFunction(function', LLVMVerifierFailureAction.LLVMPrintMessageAction) |> ignore
+      function', namedValues
 
 [<EntryPoint>]
 let main _ = 
@@ -295,6 +370,8 @@ let main _ =
     LLVM.InitializeX86TargetInfo()
     LLVM.InitializeX86Target()
     LLVM.InitializeX86TargetMC()
+    LLVM.InitializeX86AsmParser()
+    LLVM.InitializeX86AsmPrinter()
   let mutable message = ""
   if 1 = (LLVM.CreateExecutionEngineForModule(engine, module', &message)).Value 
     then 
