@@ -179,7 +179,7 @@ release.sh
 localpackages/
 paket-files
 *.orig
-.paket/paket.exe
+!.paket/paket.exe
 docsrc/content/license.md
 docsrc/content/release-notes.md
 .fake
