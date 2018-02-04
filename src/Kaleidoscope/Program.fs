@@ -104,7 +104,7 @@ module Parser =
   open AST
   open Lexer
 
-  type UserState = unit
+  type private UserState = unit
 
   [<RequireQualifiedAccess>]
   module private Expr =
@@ -206,7 +206,7 @@ module Parser =
 
     let parse = parseTopLevel 
   
-  let parse = parseWhiteSpace >>. Decl.parse
+  let private parse = parseWhiteSpace >>. Decl.parse
 
   let run = runParserOnString parse () "" 
 
@@ -223,68 +223,9 @@ module Parser =
         printfn "☠️ %s" message
         printfn ""
 
-module Driver =
-
-  let [<Literal>] Preamble = "Kaleidoscope in F# and LLVM\n"
-
-
-  // Read user input until an empty line with a return
-  // TODO: pass in a reader or see if fparsec has stdin support
-  let readLines scanner =
-    let rec readLinesIntoSeqAsync lines =
-      async {
-        let! nextLine = (scanner: TextReader).ReadLineAsync() |> Async.AwaitTask
-        if String.IsNullOrEmpty(nextLine) 
-          then return seq lines
-          else
-            do printf "-\t"
-            return! readLinesIntoSeqAsync (lines @ [ nextLine ])
-      } 
-        
-    seq { 
-      yield! readLinesIntoSeqAsync [] 
-        |> Async.RunSynchronously
-        |> Seq.rev 
-    } |> String.concat "\n"
-
-  // Main entrypoint for the driver  
-  let run scanner =
-    do 
-      printfn "%s" Preamble
-      let prompt = "ready>\t"
-      let rec runRepl () =
-        do 
-          printf "%s" prompt
-          let lines = readLines scanner
-          if String.IsNullOrWhiteSpace(lines) then runRepl ()
-          let result = Parser.run lines
-          Parser.showResult result
-          runRepl ()
-      runRepl ()
-
 open LLVMSharp
-open FParsec
-open System.Reflection.Metadata.Ecma335
 
 let [<Literal>] JitName = "my cool jit"
-
-let tests () = 
-  [
-    // "def foo(x y) x+foo(y, 4.0);"
-    // "def foo(x y) x+y y;"
-    // "def foo(x y) x+y );"
-    "extern sin(a);"
-  ]
-  |> Seq.map (fun program ->
-    async {
-      let result = Parser.run program
-      match result with
-      | Success(tree, _,_) -> printfn "%A" tree
-      | Failure(errorMessage, _, _) -> failwith errorMessage
-    })
-  |> Async.Parallel
-  |> Async.RunSynchronously
-
 let context = LLVM.GetGlobalContext()
 let module' = LLVM.ModuleCreateWithNameInContext(JitName, context)
 let builder = LLVM.CreateBuilderInContext(context)
@@ -293,9 +234,8 @@ let engine = ref (LLVMExecutionEngineRef(IntPtr.Zero))
 module Codegen =
 
   open AST
-  open LLVMSharp
 
-  let rec codegenExpr (namedValues: Map<string, LLVMValueRef>) =
+  let rec private codegenExpr (namedValues: Map<string, LLVMValueRef>) =
     function
     | Number n -> LLVM.ConstReal(LLVM.DoubleType(), n)
     | Variable name ->
@@ -325,7 +265,7 @@ module Codegen =
         Seq.toArray argsV
       LLVM.BuildCall(builder, calleeF, argsV, "calltmp")
 
-  let rec codegenDecl (namedValues: Map<string, LLVMValueRef>) =
+  let rec private codegenDecl (namedValues: Map<string, LLVMValueRef>) =
     function
     | Prototype (name, arguments) -> 
       let argumentCount = (uint32 << Seq.length) arguments
@@ -362,6 +302,70 @@ module Codegen =
       LLVM.BuildRet(builder, body) |> ignore
       LLVM.VerifyFunction(function', LLVMVerifierFailureAction.LLVMPrintMessageAction) |> ignore
       function', namedValues
+
+  let run decl = 
+    let exe, _ = codegenDecl Map.empty decl
+    LLVM.DumpValue(exe)
+
+module Driver =
+
+  let [<Literal>] Preamble = "Kaleidoscope in F# and LLVM\n"
+
+  // Read user input until an empty line with a return
+  // TODO: pass in a reader or see if fparsec has stdin support
+  let private readLines scanner =
+    let rec readLinesIntoSeqAsync lines =
+      async {
+        let! nextLine = (scanner: TextReader).ReadLineAsync() |> Async.AwaitTask
+        if String.IsNullOrEmpty(nextLine) 
+          then return seq lines
+          else
+            do printf "-\t"
+            return! readLinesIntoSeqAsync (lines @ [ nextLine ])
+      } 
+        
+    seq { 
+      yield! readLinesIntoSeqAsync [] 
+        |> Async.RunSynchronously
+        |> Seq.rev 
+    } |> String.concat "\n"
+
+  open FParsec
+
+  // Main entrypoint for the driver  
+  let run scanner =
+    do 
+      printfn "%s" Preamble
+      let prompt = "ready>\t"
+      let rec runRepl () =
+        do 
+          printf "%s" prompt
+          let lines = readLines scanner
+          if String.IsNullOrWhiteSpace(lines) then runRepl ()
+          match Parser.run lines with
+          | Failure (message, _, _) -> failwithf "☠️ %s" message
+          | Success (syntax, _, _) -> Codegen.run syntax
+          runRepl ()
+      runRepl ()
+
+open FParsec
+
+let tests () = 
+  [
+    // "def foo(x y) x+foo(y, 4.0);"
+    // "def foo(x y) x+y y;"
+    // "def foo(x y) x+y );"
+    "extern sin(a);"
+  ]
+  |> Seq.map (fun program ->
+    async {
+      let result = Parser.run program
+      match result with
+      | Success(tree, _,_) -> printfn "%A" tree
+      | Failure(errorMessage, _, _) -> failwith errorMessage
+    })
+  |> Async.Parallel
+  |> Async.RunSynchronously
 
 [<EntryPoint>]
 let main _ = 
