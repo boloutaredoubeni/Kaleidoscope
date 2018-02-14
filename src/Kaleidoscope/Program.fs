@@ -1,8 +1,20 @@
 ﻿// Learn more about F# at http://fsharp.org
 open System
 open System.IO
+open System.Collections.Generic
 
-module Token =
+[<RequireQualifiedAccess>]
+module internal Dictionary =
+
+  let tryFind key (dictionary: IDictionary<_, _>) = 
+    let thisMap =  
+        (dictionary :> seq<_>)
+        |> Seq.map (|KeyValue|)
+        |> Map.ofSeq
+    Map.tryFind key thisMap
+
+
+module internal Token =
   let [<Literal>] Plus = "+"
   let [<Literal>] Minus = "-"
   let [<Literal>] Multiply = "*"
@@ -10,12 +22,17 @@ module Token =
   let [<Literal>] LeftParen = "("
   let [<Literal>] RightParen = ")"
   let [<Literal>] Comma = ","
+  let [<Literal>] Equal = "="
   let [<Literal>] SpecialCharacters = "!%&*+-./<=>@^|~?"
-
   let [<Literal>] Def = "def"
   let [<Literal>] Extern = "extern"
+  let [<Literal>] For = "for"
+  let [<Literal>] If = "if"
+  let [<Literal>] Then = "then"
+  let [<Literal>] Else = "else"
+  let [<Literal>] In = "in"
 
-module rec AST = 
+module rec internal AST = 
 
   (* expr - Base type for all expression nodes. *)
   type Expr =
@@ -27,6 +44,12 @@ module rec AST =
     | Variable of Name: string
     (* variant for function calls. *)
     | Call of (string * seq<Expr>)
+    /// if/then/else
+    | If of  (Expr * Expr * option<Expr>)
+    /// for/in
+    | For of string * Expr * Expr * option<Expr> * Expr
+    /// var <identifier> = <expr> 
+    | Assign of Name: string * Expr
 
     override expr.ToString() =
       match expr with
@@ -39,6 +62,7 @@ module rec AST =
           |> Seq.map string
           |> String.concat ", "
         sprintf "%s (%s)" fn argRepresentation
+      | _ -> ""
   
   type Operator =
     | Plus
@@ -88,7 +112,6 @@ module Lexer =
   let parseComma = pstring Comma .>> parseWhiteSpace
   let isSymbolicOperatorChar = isAnyOf SpecialCharacters
 
-
   let remainingOperatorCharsAndWhiteSpace = manySatisfy isSymbolicOperatorChar .>> parseWhiteSpace
 
   let parseWhiteSpace1 = spaces1
@@ -99,7 +122,19 @@ module Lexer =
 
   let parseExtern = skipString Extern .>> parseWhiteSpace
 
-module Parser =
+  let parseFor = skipString For .>> parseWhiteSpace
+
+  let parseIn = skipString In .>> parseWhiteSpace
+
+  let parseIf = skipString If .>> parseWhiteSpace
+
+  let parseThen = skipString Then .>> parseWhiteSpace
+
+  let parseElse = skipString Else .>> parseWhiteSpace
+
+  let parseEqual = skipString Equal .>> parseWhiteSpace
+
+module internal Parser =
   open FParsec
   open AST
   open Lexer
@@ -135,6 +170,10 @@ module Parser =
 
       let parseVariable = parseIdentifier |>> Variable
 
+      let parseAssign =
+        let parseAssignBody = parseEqual .>> parseWhiteSpace >>. parseExpr
+        pipe2 parseIdentifier parseAssignBody (fun var expr -> (var, expr))
+
       let parseCall =
         let parseArgs =
           let parseExprs = sepBy parseExpr parseComma
@@ -143,12 +182,32 @@ module Parser =
         let operator = parseIdentifier
         operator .>>. parseArgs |>> Call
 
+      let parseIfExpr =
+        let ifExpr = parseIf >>. parseExpr .>> parseWhiteSpace1
+        let thenExpr = parseThen >>. parseExpr .>> parseWhiteSpace1
+        let elseExpr = parseElse >>. opt parseExpr .>> parseWhiteSpace1
+        let parseIfElseExpr = pipe3 ifExpr thenExpr elseExpr
+        parseIfElseExpr (fun if' then' else' -> If (if', then', else'))
+
+      let parseForExpr =
+        let initial = parseFor >>. parseAssign
+        let condition = parseComma >>. parseExpr .>> parseWhiteSpace
+        let increment = opt (parseComma >>. parseExpr .>> parseWhiteSpace)
+        let body = parseIn >>. parseExpr
+        pipe4
+          initial 
+          condition 
+          increment 
+          body 
+          (fun (id, assign) condition increment body -> For (id, assign, condition, increment, body))
+
       choice [
         parseNumber
         attempt parseCall
         attempt parseVariable
+        attempt parseIfExpr
+        attempt parseForExpr
       ]
-  
     let private addSymbolicInfixOperators (op : Operator) opp =
       let operator = 
         InfixOperator(
@@ -231,20 +290,22 @@ let module' = LLVM.ModuleCreateWithNameInContext(JitName, context)
 let builder = LLVM.CreateBuilderInContext(context)
 let engine = ref (LLVMExecutionEngineRef(IntPtr.Zero))
 
-module Codegen =
+module internal Codegen =
 
   open AST
 
-  let rec private codegenExpr (namedValues: Map<string, LLVMValueRef>) =
+  let namedValues = dict []
+
+  let rec private codegenExpr =
     function
     | Number n -> LLVM.ConstReal(LLVM.DoubleType(), n)
     | Variable name ->
-      match namedValues.TryFind(name) with
+      match Dictionary.tryFind name namedValues with
       | Some llvmValue -> llvmValue
       | _ -> failwithf "unknown variable %s" name
     | BinaryOperation (op, lhs, rhs) -> 
-      let lhs = codegenExpr namedValues lhs
-      let rhs = codegenExpr namedValues rhs
+      let lhs = codegenExpr lhs
+      let rhs = codegenExpr rhs
       match op with
       | Plus -> LLVM.BuildAdd(builder, lhs, rhs, "addtmp")
       | Minus -> LLVM.BuildSub(builder, lhs, rhs, "subtmp")
@@ -261,11 +322,135 @@ module Codegen =
       let argsV = 
         let n = Math.Max((Seq.length arguments), 1)
         let argsV = Array.zeroCreate n
-        let argsV = Seq.map2 (fun expr _valueRef -> codegenExpr namedValues expr) arguments argsV
+        let argsV = Seq.map2 (fun expr _valueRef -> codegenExpr expr) arguments argsV
         Seq.toArray argsV
       LLVM.BuildCall(builder, calleeF, argsV, "calltmp")
+    | If (condition, thenExpr, elseExpr) ->
+      let condv = 
+        let condition = codegenExpr condition
+        LLVM.BuildFCmp(
+          builder, 
+          LLVMRealPredicate.LLVMRealONE, 
+          condition, 
+          LLVM.ConstReal(LLVM.DoubleType(), 0.0), 
+          "ifcond"
+         )
+      let func = LLVM.GetBasicBlockParent(LLVM.GetInsertBlock(builder))
+      let mutable thenBB = LLVM.AppendBasicBlock(func, "then")
+      let mutable elseBB = LLVM.AppendBasicBlock(func, "else")
+      let mergeBB = LLVM.AppendBasicBlock(func, "ifcont")
+      LLVM.BuildCondBr(builder, condv, thenBB, elseBB) |> ignore
+      LLVM.PositionBuilderAtEnd(builder, thenBB) |> ignore
+      let thenV = codegenExpr thenExpr
+      thenBB <- 
+        let thenBB = LLVM.GetInsertBlock(builder)
+        LLVM.PositionBuilderAtEnd(builder, elseBB)
+        thenBB
+      let elseV = Option.map codegenExpr elseExpr
+      LLVM.BuildBr(builder, mergeBB) |> ignore
+      do
+        elseBB <- 
+          let elseBB = LLVM.GetInsertBlock(builder)
+          LLVM.PositionBuilderAtEnd(builder, mergeBB)
+          elseBB
 
-  let rec private codegenDecl (namedValues: Map<string, LLVMValueRef>) =
+      let phi = 
+        let phi = LLVM.BuildPhi(builder, LLVM.DoubleType(), "iftmp")
+        LLVM.AddIncoming(phi, [| thenV |], [| thenBB |], 1u)
+        Option.iter
+          (fun elseV -> LLVM.AddIncoming(phi, [| elseV |], [| elseBB |], 1u))
+          elseV
+        phi
+
+      phi
+    | For (var, start, finish, step, body) ->
+      // Output this as:
+      //   ...
+      //   start = startexpr
+      //   goto loop
+      // loop:
+      //   variable = phi [start, loopheader], [nextvariable, loopend]
+      //   ...
+      //   bodyexpr
+      //   ...
+      // loopend:
+      //   step = stepexpr
+      //   nextvariable = variable + step
+      //   endcond = endexpr
+      //   br endcond, loop, endloop
+      // outloop:
+
+      // Emit the start code first, without 'variable' in scope.
+      let start = codegenExpr start
+
+      // Make the new basic block for the loop header, inserting after current
+      // block.
+      let preheaderBB = LLVM.GetInsertBlock(builder)
+      let function' = LLVM.GetBasicBlockParent(preheaderBB)
+      let loopBB = LLVM.AppendBasicBlock(function', "loop")
+
+      // Insert an explicit fall through from the current block to the LoopBB.
+      LLVM.BuildBr(builder, loopBB) |> ignore
+
+      // Start insertion in LoopBB.
+      LLVM.PositionBuilderAtEnd(builder, loopBB)
+
+      // Start the PHI node with an entry for Start.
+      let variable = LLVM.BuildPhi(builder, LLVM.DoubleType(), var)
+      LLVM.AddIncoming(variable, [| start |], [| preheaderBB |], 1u)
+
+      let mutable oldVal = None
+      // Within the loop, the variable is defined equal to the PHI node.  If it
+      // shadows an existing variable, we have to restore it, so save it now.
+
+      do
+        match Dictionary.tryFind var namedValues with
+        | Some oldVal' -> 
+          oldVal <- Some oldVal'
+
+        | None -> ()
+        namedValues.Add(var, variable)
+
+      // Emit the body of the loop.  This, like any other expr, can change the
+      // current BB.  Note that we ignore the value computed by the body, but don't
+      // allow an error.
+      codegenExpr body |> ignore
+      let step = 
+        match step with
+        | Some step -> codegenExpr step
+        | None ->  LLVM.ConstReal(LLVM.DoubleType(), 1.0)
+      
+
+      let nextVar = LLVM.BuildFAdd(builder, variable, step, "nextvar")
+      let cond = 
+        let cond = codegenExpr finish
+
+        // Compute the end condition.
+        LLVM.BuildFCmp(builder, LLVMRealPredicate.LLVMRealONE, cond, LLVM.ConstReal(LLVM.DoubleType(), 0.0), "loopcond");
+
+      // Create the "after loop" block and insert it.
+      let loopEndBB = LLVM.GetInsertBlock(builder)
+      let afterBB = LLVM.AppendBasicBlock(function', "afterloop")
+
+      // Insert the conditional branch into the end of LoopEndBB.
+      LLVM.BuildCondBr(builder, cond, loopBB, afterBB) |> ignore
+
+      // Any new code will be inserted in AfterBB.
+      LLVM.PositionBuilderAtEnd(builder, afterBB)
+
+      // Add a new entry to the PHI node for the backedge.
+      LLVM.AddIncoming(variable, [| nextVar |], [| loopEndBB |], 1u)
+
+      // Restore the unshadowed variable
+      match oldVal with
+      | Some oldVal -> namedValues.Add(var, oldVal)
+      | None -> ()
+
+      // Restore the unshadowed variable.
+      LLVM.ConstNull(LLVM.DoubleType())
+
+
+  let rec private codegenDecl =
     function
     | Prototype (name, arguments) -> 
       let argumentCount = (uint32 << Seq.length) arguments
@@ -282,32 +467,30 @@ module Codegen =
             let functionType = LLVM.FunctionType(LLVM.DoubleType(), arguments, false) 
             LLVM.AddFunction(module', name, functionType)
           LLVM.SetLinkage(function', LLVMLinkage.LLVMExternalLinkage)
-      let mutable namedValues = namedValues
       Seq.iteri (fun i argumentName -> 
         let param = LLVM.GetParam(function', uint32 i)
         LLVM.SetValueName(param, argumentName)
-        namedValues <- namedValues.Add(argumentName, param)
+        namedValues.Add(argumentName, param)
       ) arguments
-      function', namedValues
+      function'
     | Function (proto, body) ->
-      let namedValues = Map.empty
-      let (function', namedValues) = codegenDecl namedValues (Prototype proto)
+      let function'= codegenDecl (Prototype proto)
       LLVM.PositionBuilderAtEnd(builder, LLVM.AppendBasicBlock(function', "entry"))
       let body = 
         try
-          codegenExpr namedValues body
+          codegenExpr  body
         with _ ->
           LLVM.DeleteFunction(function')
           reraise ()
       LLVM.BuildRet(builder, body) |> ignore
       LLVM.VerifyFunction(function', LLVMVerifierFailureAction.LLVMPrintMessageAction) |> ignore
-      function', namedValues
+      function' 
 
   let run decl = 
-    let exe, _ = codegenDecl Map.empty decl
+    let exe = codegenDecl decl
     LLVM.DumpValue(exe)
 
-module Driver =
+module internal Driver =
 
   let [<Literal>] Preamble = "Kaleidoscope in F# and LLVM\n"
 
@@ -318,17 +501,20 @@ module Driver =
       async {
         let! nextLine = (scanner: TextReader).ReadLineAsync() |> Async.AwaitTask
         if String.IsNullOrEmpty(nextLine) 
-          then return seq lines
+          then return lines
           else
             do printf "-\t"
-            return! readLinesIntoSeqAsync (lines @ [ nextLine ])
+            return! readLinesIntoSeqAsync (seq {
+              yield! lines
+              yield nextLine 
+            })
       } 
         
-    seq { 
-      yield! readLinesIntoSeqAsync [] 
-        |> Async.RunSynchronously
-        |> Seq.rev 
-    } |> String.concat "\n"
+    Seq.empty
+    |> readLinesIntoSeqAsync
+    |> Async.RunSynchronously
+    |> Seq.rev 
+    |> String.concat "\n"
 
   open FParsec
 
