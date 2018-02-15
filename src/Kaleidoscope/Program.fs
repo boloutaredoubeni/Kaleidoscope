@@ -3,6 +3,7 @@ open System
 open System.IO
 open System.Collections.Generic
 
+
 [<RequireQualifiedAccess>]
 module internal Dictionary =
 
@@ -12,6 +13,10 @@ module internal Dictionary =
         |> Seq.map (|KeyValue|)
         |> Map.ofSeq
     Map.tryFind key thisMap
+
+[<AutoOpen>]
+module internal ImplicitOperators =
+  let inline (!>) (x:^a) : ^b = ((^a or ^b) : (static member op_Implicit : ^a -> ^b) x)
 
 
 module internal Token =
@@ -31,8 +36,13 @@ module internal Token =
   let [<Literal>] Then = "then"
   let [<Literal>] Else = "else"
   let [<Literal>] In = "in"
+  let [<Literal>] Binary = "binary"
+  let [<Literal>] Unary = "unary"
+  let [<Literal>] Var = "var"
+  let [<Literal>] Semicolon = ";"
+  let [<Literal>] Hash = "#"
 
-module rec internal AST = 
+module rec AST = 
 
   (* expr - Base type for all expression nodes. *)
   type Expr =
@@ -49,7 +59,7 @@ module rec internal AST =
     /// for/in
     | For of string * Expr * Expr * option<Expr> * Expr
     /// var <identifier> = <expr> 
-    | Assign of Name: string * Expr
+    | Assign of Vars: seq<(Expr * Expr option)> * Body: Expr
 
     override expr.ToString() =
       match expr with
@@ -69,6 +79,7 @@ module rec internal AST =
     | Minus
     | LessThan
     | Multiply
+    | Equal
 
     member op.Code =
       match op with
@@ -76,10 +87,11 @@ module rec internal AST =
       | Minus -> Token.Minus
       | LessThan -> Token.LessThan
       | Multiply -> Token.Multiply
+      | Equal -> Token.Equal
 
     override op.ToString() = op.Code
 
-  type Prototype = string * seq<string>
+  type Prototype = string * seq<string> 
 
   type Decl =
   (* proto - This type represents the "prototype" for a function, which captures
@@ -118,21 +130,23 @@ module Lexer =
 
   let parseBetweenBrackets = between parseLeftParen parseRightParen
 
-  let parseDef = skipString Def .>> parseWhiteSpace
+  let parseDef = skipString Def .>> parseWhiteSpace1
 
-  let parseExtern = skipString Extern .>> parseWhiteSpace
+  let parseExtern = skipString Extern .>> parseWhiteSpace1
 
-  let parseFor = skipString For .>> parseWhiteSpace
+  let parseFor = skipString For .>> parseWhiteSpace1
 
-  let parseIn = skipString In .>> parseWhiteSpace
+  let parseIn = skipString In .>> parseWhiteSpace1
 
-  let parseIf = skipString If .>> parseWhiteSpace
+  let parseIf = skipString If .>> parseWhiteSpace1
 
-  let parseThen = skipString Then .>> parseWhiteSpace
+  let parseThen = skipString Then .>> parseWhiteSpace1
 
-  let parseElse = skipString Else .>> parseWhiteSpace
+  let parseElse = skipString Else .>> parseWhiteSpace1
 
   let parseEqual = skipString Equal .>> parseWhiteSpace
+
+  let parseVar = skipString Var .>> parseWhiteSpace1
 
 module internal Parser =
   open FParsec
@@ -151,6 +165,7 @@ module internal Parser =
         | LessThan -> 10
         | Minus -> 30
         | Multiply -> 40
+        | Equal -> 2
 
       member op.Associativity =
         match op with
@@ -173,6 +188,8 @@ module internal Parser =
       let parseAssign =
         let parseAssignBody = parseEqual .>> parseWhiteSpace >>. parseExpr
         pipe2 parseIdentifier parseAssignBody (fun var expr -> (var, expr))
+       
+      let parseAssignExpr = parseVar >>. parseAssign |>> (fun (var,  expr) -> Assign (Variable var, expr))
 
       let parseCall =
         let parseArgs =
@@ -207,6 +224,7 @@ module internal Parser =
         attempt parseVariable
         attempt parseIfExpr
         attempt parseForExpr
+        attempt parseAssignExpr
       ]
     let private addSymbolicInfixOperators (op : Operator) opp =
       let operator = 
@@ -287,6 +305,7 @@ open LLVMSharp
 let [<Literal>] JitName = "my cool jit"
 let context = LLVM.GetGlobalContext()
 let module' = LLVM.ModuleCreateWithNameInContext(JitName, context)
+
 let builder = LLVM.CreateBuilderInContext(context)
 let engine = ref (LLVMExecutionEngineRef(IntPtr.Zero))
 
@@ -295,13 +314,45 @@ module internal Codegen =
   open AST
 
   let namedValues = dict []
+  let functionProtos = dict []
+
+  let private getFunction functionName =
+    let f = LLVM.GetNamedFunction(module', functionName)
+    if f.Pointer <> IntPtr.Zero
+      then Some f
+      else Dictionary.tryFind functionName functionProtos
+
+
+  let private createEntryBlockAlloca function' varName = 
+    use builder = new IRBuilder(context)
+    builder.PositionBuilder((!>) function', function')
+    builder.CreateAlloca(LLVM.DoubleType(), varName)
+
+  let (|PrototypeArgs|_|) =
+    function
+    | Prototype (_, args) -> Some args
+    | _ -> Some Seq.empty
+
+
+  let private createArgumentAllocas function' prototype = 
+    let args = 
+      match prototype with
+      | PrototypeArgs args -> args
+    Seq.iteri (fun i ai ->
+      let varName = (args |> Seq.toArray).[i]
+      let alloca = createEntryBlockAlloca function' varName
+      do 
+        LLVM.BuildStore(builder, ai, alloca) |> ignore
+        namedValues.Add(varName, alloca)
+    ) (LLVM.GetParams(function'))
 
   let rec private codegenExpr =
     function
     | Number n -> LLVM.ConstReal(LLVM.DoubleType(), n)
     | Variable name ->
       match Dictionary.tryFind name namedValues with
-      | Some llvmValue -> llvmValue
+      | Some llvmValue ->
+        LLVM.BuildLoad(builder, llvmValue, name)
       | _ -> failwithf "unknown variable %s" name
     | BinaryOperation (op, lhs, rhs) -> 
       let lhs = codegenExpr lhs
@@ -363,7 +414,7 @@ module internal Codegen =
         phi
 
       phi
-    | For (var, start, finish, step, body) ->
+    | For (varName, start, finish, step, body) ->
       // Output this as:
       //   ...
       //   start = startexpr
@@ -381,13 +432,17 @@ module internal Codegen =
       // outloop:
 
       // Emit the start code first, without 'variable' in scope.
-      let start = codegenExpr start
+
 
       // Make the new basic block for the loop header, inserting after current
       // block.
       let preheaderBB = LLVM.GetInsertBlock(builder)
       let function' = LLVM.GetBasicBlockParent(preheaderBB)
+      let alloca = createEntryBlockAlloca function' varName
+      let start = codegenExpr start
+      do LLVM.BuildStore(builder, start, alloca) |> ignore
       let loopBB = LLVM.AppendBasicBlock(function', "loop")
+
 
       // Insert an explicit fall through from the current block to the LoopBB.
       LLVM.BuildBr(builder, loopBB) |> ignore
@@ -396,7 +451,7 @@ module internal Codegen =
       LLVM.PositionBuilderAtEnd(builder, loopBB)
 
       // Start the PHI node with an entry for Start.
-      let variable = LLVM.BuildPhi(builder, LLVM.DoubleType(), var)
+      let variable = LLVM.BuildPhi(builder, LLVM.DoubleType(), varName)
       LLVM.AddIncoming(variable, [| start |], [| preheaderBB |], 1u)
 
       let mutable oldVal = None
@@ -404,12 +459,11 @@ module internal Codegen =
       // shadows an existing variable, we have to restore it, so save it now.
 
       do
-        match Dictionary.tryFind var namedValues with
+        match Dictionary.tryFind varName namedValues with
         | Some oldVal' -> 
           oldVal <- Some oldVal'
-
         | None -> ()
-        namedValues.Add(var, variable)
+        namedValues.Add(varName, variable)
 
       // Emit the body of the loop.  This, like any other expr, can change the
       // current BB.  Note that we ignore the value computed by the body, but don't
@@ -421,13 +475,16 @@ module internal Codegen =
         | None ->  LLVM.ConstReal(LLVM.DoubleType(), 1.0)
       
 
-      let nextVar = LLVM.BuildFAdd(builder, variable, step, "nextvar")
+
       let cond = 
         let cond = codegenExpr finish
 
         // Compute the end condition.
         LLVM.BuildFCmp(builder, LLVMRealPredicate.LLVMRealONE, cond, LLVM.ConstReal(LLVM.DoubleType(), 0.0), "loopcond");
 
+      let currentVar = LLVM.BuildLoad(builder, alloca, varName)
+      let nextVar = LLVM.BuildFAdd(builder, currentVar, step, "nextvar")
+      do LLVM.BuildStore(builder, nextVar, alloca) |> ignore
       // Create the "after loop" block and insert it.
       let loopEndBB = LLVM.GetInsertBlock(builder)
       let afterBB = LLVM.AppendBasicBlock(function', "afterloop")
@@ -443,12 +500,20 @@ module internal Codegen =
 
       // Restore the unshadowed variable
       match oldVal with
-      | Some oldVal -> namedValues.Add(var, oldVal)
+      | Some oldVal -> namedValues.Add(varName, oldVal)
       | None -> ()
 
       // Restore the unshadowed variable.
       LLVM.ConstNull(LLVM.DoubleType())
-
+    | Assign (Variable name, body) -> 
+      let body = codegenExpr body
+      let variable = 
+        match Dictionary.tryFind name namedValues with
+        | Some variable -> variable
+        | None -> failwith "unkown variable name"
+      do LLVM.BuildStore(builder, body, variable) |> ignore
+      body
+    | _ -> failwith "Assert false"
 
   let rec private codegenDecl =
     function
@@ -568,31 +633,31 @@ let main _ =
       printfn "%s" message
       1
     else
-      let passManager = LLVM.CreateFunctionPassManagerForModule(module')
+      let functionPassManager = LLVM.CreateFunctionPassManagerForModule(module')
       // Provide basic AliasAnalysis support for GVN.
-      LLVM.AddBasicAliasAnalysisPass(passManager)
+      LLVM.AddBasicAliasAnalysisPass(functionPassManager)
 
       // Promote allocas to registers.
-      LLVM.AddPromoteMemoryToRegisterPass(passManager)
+      LLVM.AddPromoteMemoryToRegisterPass(functionPassManager)
 
       // Do simple "peephole" optimizations and bit-twiddling optzns.
-      LLVM.AddInstructionCombiningPass(passManager)
+      LLVM.AddInstructionCombiningPass(functionPassManager)
 
       // Reassociate expressions.
-      LLVM.AddReassociatePass(passManager)
+      LLVM.AddReassociatePass(functionPassManager)
 
       // Eliminate Common SubExpressions.
-      LLVM.AddGVNPass(passManager)
+      LLVM.AddGVNPass(functionPassManager)
 
       // Simplify the control flow graph (deleting unreachable blocks, etc).
-      LLVM.AddCFGSimplificationPass(passManager)
+      LLVM.AddCFGSimplificationPass(functionPassManager)
 
-      ignore <| LLVM.InitializeFunctionPassManager(passManager)
+      ignore <| LLVM.InitializeFunctionPassManager(functionPassManager)
       (* Run the main "interpreter loop" now. *)
       ignore <| tests ()
       Driver.run(Console.In)
       LLVM.DumpModule(module')
       LLVM.DisposeModule(module')
       LLVM.DisposeExecutionEngine(!engine)
-      LLVM.DisposePassManager(passManager)
+      LLVM.DisposePassManager(functionPassManager)
       0
