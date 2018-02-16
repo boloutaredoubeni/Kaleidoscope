@@ -130,6 +130,8 @@ module Lexer =
 
   let parseBetweenBrackets = between parseLeftParen parseRightParen
 
+  let parseSepByComma expr = sepBy expr parseComma
+
   let parseDef = skipString Def .>> parseWhiteSpace1
 
   let parseExtern = skipString Extern .>> parseWhiteSpace1
@@ -185,38 +187,54 @@ module internal Parser =
 
       let parseVariable = parseIdentifier |>> Variable
 
+      let parseAssignBody = parseEqual .>> parseWhiteSpace >>. parseExpr
+
       let parseAssign =
-        let parseAssignBody = parseEqual .>> parseWhiteSpace >>. parseExpr
         pipe2 parseIdentifier parseAssignBody (fun var expr -> (var, expr))
        
-      let parseAssignExpr = parseVar >>. parseAssign |>> (fun (var,  expr) -> Assign (Variable var, expr))
+      let parseAssignExprs = 
+        let parseInnerExpr = parse {
+            let! var = parseVariable
+            do! parseEqual
+            let! body = parseExpr |> opt
+            return (var, body)
+          }
+        parse {
+          do! parseVar
+          let! defs = parseSepByComma parseInnerExpr |>> Seq.ofList
+          do! parseIn
+          let! body = parseExpr
+          return Assign (defs, body)
+        }
+      //parseVar >>. parseAssign |>> (fun (var,  expr) -> Assign (Variable var, expr))
 
       let parseCall =
-        let parseArgs =
-          let parseExprs = sepBy parseExpr parseComma
-          let parseArguments = between parseLeftParen parseRightParen parseExprs
-          parseArguments |>> seq
-        let operator = parseIdentifier
-        operator .>>. parseArgs |>> Call
+        parse {
+          let! args =
+            let parseExprs = sepBy parseExpr parseComma
+            let parseArguments = between parseLeftParen parseRightParen parseExprs
+            parseArguments |>> seq
+          let! operator = parseIdentifier
+          return Call(operator, args)
+        }
 
       let parseIfExpr =
-        let ifExpr = parseIf >>. parseExpr .>> parseWhiteSpace1
-        let thenExpr = parseThen >>. parseExpr .>> parseWhiteSpace1
-        let elseExpr = parseElse >>. opt parseExpr .>> parseWhiteSpace1
-        let parseIfElseExpr = pipe3 ifExpr thenExpr elseExpr
-        parseIfElseExpr (fun if' then' else' -> If (if', then', else'))
+        parse {
+          let! if' = parseIf >>. parseExpr .>> parseWhiteSpace1
+          let! then' = parseThen >>. parseExpr .>> parseWhiteSpace1
+          let! else' = parseElse >>. opt parseExpr .>> parseWhiteSpace1
+          return If (if', then', else')
+        }
+        
 
       let parseForExpr =
-        let initial = parseFor >>. parseAssign
-        let condition = parseComma >>. parseExpr .>> parseWhiteSpace
-        let increment = opt (parseComma >>. parseExpr .>> parseWhiteSpace)
-        let body = parseIn >>. parseExpr
-        pipe4
-          initial 
-          condition 
-          increment 
-          body 
-          (fun (id, assign) condition increment body -> For (id, assign, condition, increment, body))
+        parse {
+          let! (id, assign) = parseFor >>. parseAssign
+          let! condition = parseComma >>. parseExpr .>> parseWhiteSpace
+          let! increment = opt (parseComma >>. parseExpr .>> parseWhiteSpace)
+          let! body = parseIn >>. parseExpr
+          return For (id, assign, condition, increment, body)
+        }
 
       choice [
         parseNumber
@@ -224,7 +242,7 @@ module internal Parser =
         attempt parseVariable
         attempt parseIfExpr
         attempt parseForExpr
-        attempt parseAssignExpr
+        attempt parseAssignExprs
       ]
     let private addSymbolicInfixOperators (op : Operator) opp =
       let operator = 
@@ -301,6 +319,14 @@ module internal Parser =
         printfn ""
 
 open LLVMSharp
+
+module LLVM =
+  module Extensions =
+
+    do ()
+  
+  do ()
+
 
 let [<Literal>] JitName = "my cool jit"
 let context = LLVM.GetGlobalContext()
@@ -505,14 +531,39 @@ module internal Codegen =
 
       // Restore the unshadowed variable.
       LLVM.ConstNull(LLVM.DoubleType())
-    | Assign (Variable name, body) -> 
+    | Assign (variables, body) -> 
+      let mutable oldBindings = Seq.empty
+      let function' = 
+        let insertionBlock = LLVM.GetInsertBlock(builder)
+        LLVM.GetBasicBlockParent(insertionBlock)
+      do 
+        Seq.iter (fun (Variable name, init) ->
+          let initVal = 
+            match init with
+            | Some init -> codegenExpr init
+            | None -> LLVM.ConstReal(LLVM.DoubleType(), 0.0)
+          let alloca = createEntryBlockAlloca  function' name
+          do 
+            LLVM.BuildStore(builder, initVal, alloca) |> ignore
+            Dictionary.tryFind name namedValues
+            |> Option.iter (fun oldValue ->
+              oldBindings <- seq { 
+                yield (name, oldValue)
+                yield! oldBindings
+              }
+            )
+          namedValues.Add(name, alloca)
+        ) variables
+      
       let body = codegenExpr body
-      let variable = 
-        match Dictionary.tryFind name namedValues with
-        | Some variable -> variable
-        | None -> failwith "unkown variable name"
-      do LLVM.BuildStore(builder, body, variable) |> ignore
+      do Seq.iter (fun (name, oldValue) -> namedValues.Add(name, oldValue)) oldBindings
       body
+      // let variable = 
+      //   match Dictionary.tryFind name namedValues with
+      //   | Some variable -> variable
+      //   | None -> failwith "unkown variable name"
+      // do LLVM.BuildStore(builder, body, variable) |> ignore
+      // body
     | _ -> failwith "Assert false"
 
   let rec private codegenDecl =
