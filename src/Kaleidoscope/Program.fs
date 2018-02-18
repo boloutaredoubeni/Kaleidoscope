@@ -7,8 +7,8 @@ open System.Collections.Generic
 [<RequireQualifiedAccess>]
 module internal Dictionary =
 
-  let tryFind key (dictionary: IDictionary<_, _>) = 
-    let thisMap =  
+  let tryFind key (dictionary: IDictionary<_, _>) =
+    let thisMap =
         (dictionary :> seq<_>)
         |> Seq.map (|KeyValue|)
         |> Map.ofSeq
@@ -42,7 +42,7 @@ module internal Token =
   let [<Literal>] Semicolon = ";"
   let [<Literal>] Hash = "#"
 
-module rec AST = 
+module rec AST =
 
   (* expr - Base type for all expression nodes. *)
   type Expr =
@@ -58,14 +58,14 @@ module rec AST =
     | If of  (Expr * Expr * option<Expr>)
     /// for/in
     | For of string * Expr * Expr * option<Expr> * Expr
-    /// var <identifier> = <expr> 
+    /// var <identifier> = <expr>
     | Assign of Vars: seq<(Expr * Expr option)> * Body: Expr
 
     override expr.ToString() =
       match expr with
       | BinaryOperation (op, lhs, rhs) -> sprintf "%O %O %O" lhs op rhs
       | Number n -> sprintf "%f" n
-      | Variable identifier -> sprintf "%s" identifier 
+      | Variable identifier -> sprintf "%s" identifier
       | Call(fn, args) ->
         let argRepresentation =
           args
@@ -73,7 +73,7 @@ module rec AST =
           |> String.concat ", "
         sprintf "%s (%s)" fn argRepresentation
       | _ -> ""
-  
+
   type Operator =
     | Plus
     | Minus
@@ -91,7 +91,7 @@ module rec AST =
 
     override op.ToString() = op.Code
 
-  type Prototype = string * seq<string> 
+  type Prototype = string * seq<string>
 
   type Decl =
   (* proto - This type represents the "prototype" for a function, which captures
@@ -102,8 +102,8 @@ module rec AST =
   (* func - This type represents a function definition itself. *)
     | Function of Prototype: Prototype * Body: Expr
 
-    override decl.ToString() = 
-      let prototypeToString (name, args) = 
+    override decl.ToString() =
+      let prototypeToString (name, args) =
         let argRepresentation = String.concat " " args
         sprintf "%s %s" name argRepresentation
       match decl with
@@ -116,7 +116,7 @@ module Lexer =
   open Token
 
   let parseWhiteSpace = spaces
-  
+
   let parseLeftParen = pstring LeftParen .>> parseWhiteSpace
 
   let parseRightParen = pstring RightParen .>> parseWhiteSpace
@@ -160,7 +160,7 @@ module internal Parser =
   [<RequireQualifiedAccess>]
   module private Expr =
     type private AST.Operator with
-    
+
       member op.Precedence =
         match op with
         | Plus -> 20
@@ -176,7 +176,7 @@ module internal Parser =
 
     let private parseExpr, parseExprRef = createParserForwardedToRef<Expr, _>()
 
-    let parseIdentifier = 
+    let parseIdentifier =
       let options = IdentifierOptions()
       let parseIdentifierWithOptions = identifier options
       parseIdentifierWithOptions .>> parseWhiteSpace
@@ -191,8 +191,8 @@ module internal Parser =
 
       let parseAssign =
         pipe2 parseIdentifier parseAssignBody (fun var expr -> (var, expr))
-       
-      let parseAssignExprs = 
+
+      let parseAssignExprs =
         let parseInnerExpr = parse {
             let! var = parseVariable
             do! parseEqual
@@ -225,7 +225,7 @@ module internal Parser =
           let! else' = parseElse >>. opt parseExpr .>> parseWhiteSpace1
           return If (if', then', else')
         }
-        
+
 
       let parseForExpr =
         parse {
@@ -245,7 +245,7 @@ module internal Parser =
         attempt parseAssignExprs
       ]
     let private addSymbolicInfixOperators (op : Operator) opp =
-      let operator = 
+      let operator =
         InfixOperator(
           op.Code,
           remainingOperatorCharsAndWhiteSpace,
@@ -255,13 +255,13 @@ module internal Parser =
           fun _ lhs rhs -> BinaryOperation(op, lhs, rhs)
       )
       (opp : OperatorPrecedenceParser<_, _, _>).AddOperator(operator)
-    
-    let private operatorPrecendenceParser = 
-      let parseTerm = 
+
+    let private operatorPrecendenceParser =
+      let parseTerm =
         parseValue .>> parseWhiteSpace
         <|> parseBetweenBrackets parseExpr
       let opp = OperatorPrecedenceParser()
-      do 
+      do
         opp.TermParser <- parseTerm
         addSymbolicInfixOperators LessThan opp
         addSymbolicInfixOperators Plus opp
@@ -274,7 +274,7 @@ module internal Parser =
     do parseExprRef := parseBinaryOperation
 
     let parse = parseWhiteSpace >>. parseExpr
-         
+
   [<RequireQualifiedAccess>]
   module private Decl =
 
@@ -282,11 +282,11 @@ module internal Parser =
       static member EmptyPrototype = ("", Seq.empty)
 
     let private parseTopLevel =
-      let parsePrototype = 
+      let parsePrototype =
         let parseArgument = sepBy Expr.parseIdentifier parseWhiteSpace
         let parseArguments = between parseLeftParen parseRightParen parseArgument
         Expr.parseIdentifier .>> parseWhiteSpace .>>. parseArguments |>> (fun (name, args) -> (name, seq args))
-      let parseDefinition = 
+      let parseDefinition =
         parseDef .>> parseWhiteSpace >>. parsePrototype .>>. Expr.parse |>> Function
       let parseExtern =
         parseExtern .>> parseWhiteSpace >>. parsePrototype |>> Prototype
@@ -299,13 +299,13 @@ module internal Parser =
         attempt parseTopLevel
       ]
 
-    let parse = parseTopLevel 
-  
+    let parse = parseTopLevel
+
   let private parse = parseWhiteSpace >>. Decl.parse
 
-  let run = runParserOnString parse () "" 
+  let run = runParserOnString parse () ""
 
-  let showResult = 
+  let showResult =
     function
     | Success(result, _, _) ->
       do
@@ -313,7 +313,7 @@ module internal Parser =
         printfn "=> %O" result
         printfn ""
     | Failure(message, _, _) ->
-      do 
+      do
         printfn ""
         printfn "☠️ %s" message
         printfn ""
@@ -324,7 +324,7 @@ module LLVM =
   module Extensions =
 
     do ()
-  
+
   do ()
 
 
@@ -349,7 +349,7 @@ module internal Codegen =
       else Dictionary.tryFind functionName functionProtos
 
 
-  let private createEntryBlockAlloca function' varName = 
+  let private createEntryBlockAlloca function' varName =
     use builder = new IRBuilder(context)
     builder.PositionBuilder((!>) function', function')
     builder.CreateAlloca(LLVM.DoubleType(), varName)
@@ -360,14 +360,14 @@ module internal Codegen =
     | _ -> Some Seq.empty
 
 
-  let private createArgumentAllocas function' prototype = 
-    let args = 
+  let private createArgumentAllocas function' prototype =
+    let args =
       match prototype with
       | PrototypeArgs args -> args
     Seq.iteri (fun i ai ->
       let varName = (args |> Seq.toArray).[i]
       let alloca = createEntryBlockAlloca function' varName
-      do 
+      do
         LLVM.BuildStore(builder, ai, alloca) |> ignore
         namedValues.Add(varName, alloca)
     ) (LLVM.GetParams(function'))
@@ -380,7 +380,7 @@ module internal Codegen =
       | Some llvmValue ->
         LLVM.BuildLoad(builder, llvmValue, name)
       | _ -> failwithf "unknown variable %s" name
-    | BinaryOperation (op, lhs, rhs) -> 
+    | BinaryOperation (op, lhs, rhs) ->
       let lhs = codegenExpr lhs
       let rhs = codegenExpr rhs
       match op with
@@ -390,26 +390,26 @@ module internal Codegen =
       | LessThan ->
         LLVM.BuildUIToFP(builder, LLVM.BuildFCmp(builder, LLVMRealPredicate.LLVMRealULT, lhs, rhs, "cmptmp"), LLVM.DoubleType(), "booltmp");
     | Call (functionName, arguments) ->
-      let calleeF = 
+      let calleeF =
         let calleeF = LLVM.GetNamedFunction(module', functionName)
         if calleeF.Pointer <> IntPtr.Zero then failwithf "Unknown function %s referenced" functionName
         let argumentCount = (uint32 << Seq.length) arguments
         if LLVM.CountParams(calleeF) <> argumentCount then failwith "Incorrect # of arguments passed"
         calleeF
-      let argsV = 
+      let argsV =
         let n = Math.Max((Seq.length arguments), 1)
         let argsV = Array.zeroCreate n
         let argsV = Seq.map2 (fun expr _valueRef -> codegenExpr expr) arguments argsV
         Seq.toArray argsV
       LLVM.BuildCall(builder, calleeF, argsV, "calltmp")
     | If (condition, thenExpr, elseExpr) ->
-      let condv = 
+      let condv =
         let condition = codegenExpr condition
         LLVM.BuildFCmp(
-          builder, 
-          LLVMRealPredicate.LLVMRealONE, 
-          condition, 
-          LLVM.ConstReal(LLVM.DoubleType(), 0.0), 
+          builder,
+          LLVMRealPredicate.LLVMRealONE,
+          condition,
+          LLVM.ConstReal(LLVM.DoubleType(), 0.0),
           "ifcond"
          )
       let func = LLVM.GetBasicBlockParent(LLVM.GetInsertBlock(builder))
@@ -419,19 +419,19 @@ module internal Codegen =
       LLVM.BuildCondBr(builder, condv, thenBB, elseBB) |> ignore
       LLVM.PositionBuilderAtEnd(builder, thenBB) |> ignore
       let thenV = codegenExpr thenExpr
-      thenBB <- 
+      thenBB <-
         let thenBB = LLVM.GetInsertBlock(builder)
         LLVM.PositionBuilderAtEnd(builder, elseBB)
         thenBB
       let elseV = Option.map codegenExpr elseExpr
       LLVM.BuildBr(builder, mergeBB) |> ignore
       do
-        elseBB <- 
+        elseBB <-
           let elseBB = LLVM.GetInsertBlock(builder)
           LLVM.PositionBuilderAtEnd(builder, mergeBB)
           elseBB
 
-      let phi = 
+      let phi =
         let phi = LLVM.BuildPhi(builder, LLVM.DoubleType(), "iftmp")
         LLVM.AddIncoming(phi, [| thenV |], [| thenBB |], 1u)
         Option.iter
@@ -486,7 +486,7 @@ module internal Codegen =
 
       do
         match Dictionary.tryFind varName namedValues with
-        | Some oldVal' -> 
+        | Some oldVal' ->
           oldVal <- Some oldVal'
         | None -> ()
         namedValues.Add(varName, variable)
@@ -495,14 +495,14 @@ module internal Codegen =
       // current BB.  Note that we ignore the value computed by the body, but don't
       // allow an error.
       codegenExpr body |> ignore
-      let step = 
+      let step =
         match step with
         | Some step -> codegenExpr step
         | None ->  LLVM.ConstReal(LLVM.DoubleType(), 1.0)
-      
 
 
-      let cond = 
+
+      let cond =
         let cond = codegenExpr finish
 
         // Compute the end condition.
@@ -531,59 +531,52 @@ module internal Codegen =
 
       // Restore the unshadowed variable.
       LLVM.ConstNull(LLVM.DoubleType())
-    | Assign (variables, body) -> 
+    | Assign (variables, body) ->
       let mutable oldBindings = Seq.empty
-      let function' = 
+      let function' =
         let insertionBlock = LLVM.GetInsertBlock(builder)
         LLVM.GetBasicBlockParent(insertionBlock)
-      do 
+      do
         Seq.iter (fun (Variable name, init) ->
-          let initVal = 
+          let initVal =
             match init with
             | Some init -> codegenExpr init
             | None -> LLVM.ConstReal(LLVM.DoubleType(), 0.0)
           let alloca = createEntryBlockAlloca  function' name
-          do 
+          do
             LLVM.BuildStore(builder, initVal, alloca) |> ignore
             Dictionary.tryFind name namedValues
             |> Option.iter (fun oldValue ->
-              oldBindings <- seq { 
+              oldBindings <- seq {
                 yield (name, oldValue)
                 yield! oldBindings
               }
             )
           namedValues.Add(name, alloca)
         ) variables
-      
+
       let body = codegenExpr body
       do Seq.iter (fun (name, oldValue) -> namedValues.Add(name, oldValue)) oldBindings
       body
-      // let variable = 
-      //   match Dictionary.tryFind name namedValues with
-      //   | Some variable -> variable
-      //   | None -> failwith "unkown variable name"
-      // do LLVM.BuildStore(builder, body, variable) |> ignore
-      // body
-    | _ -> failwith "Assert false"
 
   let rec private codegenDecl =
     function
-    | Prototype (name, arguments) -> 
+    | Prototype (name, arguments) ->
       let argumentCount = (uint32 << Seq.length) arguments
       let mutable function' = LLVM.GetNamedFunction(module', name)
       if (function'.Pointer <> IntPtr.Zero)
-        then 
+        then
           if LLVM.CountBasicBlocks(function') <> 0u then failwithf "redefinition of function %s" name
           if LLVM.CountParams(function') <> argumentCount then failwithf "redefinition of function %s with a different # of args" name
-        else 
+        else
           let arguments =
             let n = Math.Max(int argumentCount, 1)
             Array.create n (LLVM.DoubleType())
           function' <-
-            let functionType = LLVM.FunctionType(LLVM.DoubleType(), arguments, false) 
+            let functionType = LLVM.FunctionType(LLVM.DoubleType(), arguments, false)
             LLVM.AddFunction(module', name, functionType)
           LLVM.SetLinkage(function', LLVMLinkage.LLVMExternalLinkage)
-      Seq.iteri (fun i argumentName -> 
+      Seq.iteri (fun i argumentName ->
         let param = LLVM.GetParam(function', uint32 i)
         LLVM.SetValueName(param, argumentName)
         namedValues.Add(argumentName, param)
@@ -592,7 +585,7 @@ module internal Codegen =
     | Function (proto, body) ->
       let function'= codegenDecl (Prototype proto)
       LLVM.PositionBuilderAtEnd(builder, LLVM.AppendBasicBlock(function', "entry"))
-      let body = 
+      let body =
         try
           codegenExpr  body
         with _ ->
@@ -600,9 +593,9 @@ module internal Codegen =
           reraise ()
       LLVM.BuildRet(builder, body) |> ignore
       LLVM.VerifyFunction(function', LLVMVerifierFailureAction.LLVMPrintMessageAction) |> ignore
-      function' 
+      function'
 
-  let run decl = 
+  let run decl =
     let exe = codegenDecl decl
     LLVM.DumpValue(exe)
 
@@ -616,31 +609,31 @@ module internal Driver =
     let rec readLinesIntoSeqAsync lines =
       async {
         let! nextLine = (scanner: TextReader).ReadLineAsync() |> Async.AwaitTask
-        if String.IsNullOrEmpty(nextLine) 
+        if String.IsNullOrEmpty(nextLine)
           then return lines
           else
             do printf "-\t"
             return! readLinesIntoSeqAsync (seq {
               yield! lines
-              yield nextLine 
+              yield nextLine
             })
-      } 
-        
+      }
+
     Seq.empty
     |> readLinesIntoSeqAsync
     |> Async.RunSynchronously
-    |> Seq.rev 
+    |> Seq.rev
     |> String.concat "\n"
 
   open FParsec
 
-  // Main entrypoint for the driver  
+  // Main entrypoint for the driver
   let run scanner =
-    do 
+    do
       printfn "%s" Preamble
       let prompt = "ready>\t"
       let rec runRepl () =
-        do 
+        do
           printf "%s" prompt
           let lines = readLines scanner
           if String.IsNullOrWhiteSpace(lines) then runRepl ()
@@ -652,7 +645,7 @@ module internal Driver =
 
 open FParsec
 
-let tests () = 
+let tests () =
   [
     // "def foo(x y) x+foo(y, 4.0);"
     // "def foo(x y) x+y y;"
@@ -670,8 +663,8 @@ let tests () =
   |> Async.RunSynchronously
 
 [<EntryPoint>]
-let main _ = 
-  do 
+let main _ =
+  do
     LLVM.LinkInMCJIT()
     LLVM.InitializeX86TargetInfo()
     LLVM.InitializeX86Target()
@@ -679,8 +672,8 @@ let main _ =
     LLVM.InitializeX86AsmParser()
     LLVM.InitializeX86AsmPrinter()
   let mutable message = ""
-  if 1 = (LLVM.CreateExecutionEngineForModule(engine, module', &message)).Value 
-    then 
+  if 1 = (LLVM.CreateExecutionEngineForModule(engine, module', &message)).Value
+    then
       printfn "%s" message
       1
     else
