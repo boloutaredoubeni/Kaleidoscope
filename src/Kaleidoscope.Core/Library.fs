@@ -618,7 +618,6 @@ module Driver =
     Seq.empty
     |> readLinesIntoSeqAsync
     |> Async.RunSynchronously
-    |> Seq.rev
     |> String.concat "\n"
 
   open FParsec
