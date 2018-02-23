@@ -1,3 +1,5 @@
+#!/usr/bin/env fsharpi
+// References generated via `mono .paket/paket.exe generate-load-scripts`
 #load ".paket/load/net471/main.group.fsx"
 #r "src/Kaleidoscope/bin/Release/netcoreapp2.0/Kaleidoscope.dll"
 open System
