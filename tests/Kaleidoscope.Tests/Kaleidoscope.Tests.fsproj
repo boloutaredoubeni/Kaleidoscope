@@ -9,7 +9,7 @@
     <Compile Include="Main.fs" />
   </ItemGroup>
   <ItemGroup>
-    <ProjectReference Include="../../src/Kaleidoscope.Core/Kaleidoscope.Core.fsproj" />
+    <ProjectReference Include="../../src/Kaleidoscope/Kaleidoscope.fsproj" />
   </ItemGroup>
   <Import Project="..\..\.paket\Paket.Restore.targets" />
 </Project>
