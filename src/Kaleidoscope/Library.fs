@@ -613,53 +613,51 @@ module Driver =
     open Codegen
     open Parser
 
-    type IDriver =
-        abstract member Run: scanner:TextReader -> parser:IParser -> codegen:ICodeGenerator -> Result<unit, exn>
 
     let [<Literal>] Preamble = "Kaleidoscope in F# and LLVM\n"
 
-    type private Driver(module', engine, functionPassManager) =
+    [<Sealed>]
+    type Driver internal(module', engine, functionPassManager) =
         interface IDisposable with
             member __.Dispose () =
                 LLVM.DumpModule(module')
                 LLVM.DisposeModule(module')
                 LLVM.DisposeExecutionEngine(!engine)
                 LLVM.DisposePassManager functionPassManager
-        interface IDriver with
-            member __.Run scanner parser codegen =
-                let readLines scanner =
-                    let rec readLinesIntoSeqAsync lines =
-                        async {
-                            let! nextLine = (scanner: TextReader).ReadLineAsync() |> Async.AwaitTask
-                            if String.IsNullOrEmpty(nextLine)
-                                then return lines
-                                else
-                                    do printf "-\t"
-                                    return! readLinesIntoSeqAsync (seq {
-                                        yield! lines
-                                        yield nextLine
-                                    })
-                        }
-
-                    Seq.empty
-                    |> readLinesIntoSeqAsync
-                    |> Async.RunSynchronously
-                    |> String.concat "\n"
-                do printfn "%s" Preamble
-                let prompt = "ready>\t"
-                let rec runRepl () =
-                    resultOf {
-                        printf "%s" prompt
-                        let lines = readLines scanner
-                        if String.IsNullOrWhiteSpace(lines)
-                            then do! runRepl ()
+        member __.Run (scanner: TextReader) (parser: IParser) (codegen: ICodeGenerator) =
+            let readLines scanner =
+                let rec readLinesIntoSeqAsync lines =
+                    async {
+                        let! nextLine = (scanner: TextReader).ReadLineAsync() |> Async.AwaitTask
+                        if String.IsNullOrEmpty(nextLine)
+                            then return lines
                             else
-                                let! t = parser.RunOnString lines
-                                do codegen.Run t
-                                // do! codegen.Run t
-                                return! runRepl ()
+                                do printf "-\t"
+                                return! readLinesIntoSeqAsync (seq {
+                                    yield! lines
+                                    yield nextLine
+                                })
                     }
-                runRepl ()
+
+                Seq.empty
+                |> readLinesIntoSeqAsync
+                |> Async.RunSynchronously
+                |> String.concat "\n"
+            do printfn "%s" Preamble
+            let prompt = "ready>\t"
+            let rec runRepl () =
+                resultOf {
+                    printf "%s" prompt
+                    let lines = readLines scanner
+                    if String.IsNullOrWhiteSpace(lines)
+                        then do! runRepl ()
+                        else
+                            let! t = parser.RunOnString lines
+                            do codegen.Run t
+                            // do! codegen.Run t
+                            return! runRepl ()
+                }
+            runRepl ()
 
     let Create module' engine =
         let init () =
@@ -698,7 +696,7 @@ module Driver =
 
                     Result.Ok functionPassManager
         match init () with
-        | Result.Ok functionPassManager -> new Driver(module', engine, functionPassManager) :> IDriver |> Result.Ok
+        | Result.Ok functionPassManager -> new Driver(module', engine, functionPassManager) |> Result.Ok
         | Result.Error error -> Result.Error error
 
 
