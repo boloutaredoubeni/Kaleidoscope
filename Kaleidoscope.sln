@@ -11,6 +11,8 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "tests", "tests", "{0F4D5045
 EndProject
 Project("{F2A71F9B-5D33-465A-A702-920D77279786}") = "Kaleidoscope.Tests", "tests\Kaleidoscope.Tests\Kaleidoscope.Tests.fsproj", "{9AF032D8-2FA1-464E-A49C-5FA24A3AE2BB}"
 EndProject
+Project("{F2A71F9B-5D33-465A-A702-920D77279786}") = "Kaleidoscope.Main", "src\Kaleidoscope.Main\Kaleidoscope.Main.fsproj", "{BF69B8CF-1DFA-4C6F-9A47-064CFC576B6D}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -48,9 +50,22 @@ Global
 		{9AF032D8-2FA1-464E-A49C-5FA24A3AE2BB}.Release|x64.Build.0 = Release|x64
 		{9AF032D8-2FA1-464E-A49C-5FA24A3AE2BB}.Release|x86.ActiveCfg = Release|x86
 		{9AF032D8-2FA1-464E-A49C-5FA24A3AE2BB}.Release|x86.Build.0 = Release|x86
+		{BF69B8CF-1DFA-4C6F-9A47-064CFC576B6D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{BF69B8CF-1DFA-4C6F-9A47-064CFC576B6D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{BF69B8CF-1DFA-4C6F-9A47-064CFC576B6D}.Debug|x64.ActiveCfg = Debug|x64
+		{BF69B8CF-1DFA-4C6F-9A47-064CFC576B6D}.Debug|x64.Build.0 = Debug|x64
+		{BF69B8CF-1DFA-4C6F-9A47-064CFC576B6D}.Debug|x86.ActiveCfg = Debug|x86
+		{BF69B8CF-1DFA-4C6F-9A47-064CFC576B6D}.Debug|x86.Build.0 = Debug|x86
+		{BF69B8CF-1DFA-4C6F-9A47-064CFC576B6D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{BF69B8CF-1DFA-4C6F-9A47-064CFC576B6D}.Release|Any CPU.Build.0 = Release|Any CPU
+		{BF69B8CF-1DFA-4C6F-9A47-064CFC576B6D}.Release|x64.ActiveCfg = Release|x64
+		{BF69B8CF-1DFA-4C6F-9A47-064CFC576B6D}.Release|x64.Build.0 = Release|x64
+		{BF69B8CF-1DFA-4C6F-9A47-064CFC576B6D}.Release|x86.ActiveCfg = Release|x86
+		{BF69B8CF-1DFA-4C6F-9A47-064CFC576B6D}.Release|x86.Build.0 = Release|x86
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{56CACDD5-B0FC-4DE2-9AFE-B4318A90DAD2} = {1AE6B7A3-5E43-41D3-BA8F-3FB24F74C423}
 		{9AF032D8-2FA1-464E-A49C-5FA24A3AE2BB} = {0F4D5045-162C-4084-837B-6A95D9A84A0B}
+		{BF69B8CF-1DFA-4C6F-9A47-064CFC576B6D} = {1AE6B7A3-5E43-41D3-BA8F-3FB24F74C423}
 	EndGlobalSection
 EndGlobal
