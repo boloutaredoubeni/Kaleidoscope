@@ -1,8 +1,23 @@
 #!/usr/bin/env fsharpi
+open System
 // References generated via `mono .paket/paket.exe generate-load-scripts`
 #load ".paket/load/netcoreapp2.0/LLVMSharp.fsx"
 #r "src/Kaleidoscope/bin/Release/netcoreapp2.0/Kaleidoscope.dll"
-open System
+do
+    let libLlvmDllPath =
+        let os =
+            match Environment.OSVersion.Platform with
+            | PlatformID.MacOSX -> "osx"
+            | PlatformID.Unix -> "linux-x64"
+            | _ -> "win-x64"
+        __SOURCE_DIRECTORY__
+        + "/packages/libLLVM/runtimes/"
+        + os
+        + "/native"
+    printfn "%s" libLlvmDllPath
+    Environment.SetEnvironmentVariable("Path",
+        Environment.GetEnvironmentVariable("Path") + ";" + libLlvmDllPath)
+
 open LLVMSharp
 open Kaleidoscope
 
