@@ -1,6 +1,6 @@
 #!/usr/bin/env fsharpi
 // References generated via `mono .paket/paket.exe generate-load-scripts`
-#load ".paket/load/net471/main.group.fsx"
+#load ".paket/load/netcoreapp2.0/LLVMSharp.fsx"
 #r "src/Kaleidoscope/bin/Release/netcoreapp2.0/Kaleidoscope.dll"
 open System
 open LLVMSharp
@@ -13,13 +13,8 @@ let module' = LLVM.ModuleCreateWithNameInContext(JitName, context)
 let builder = LLVM.CreateBuilderInContext(context)
 let engine = ref (LLVMExecutionEngineRef(IntPtr.Zero))
 
-let driver = Driver.Create module' engine
-do
-    match driver with
-    | Ok driver ->
-        driver.Run
-            Console.In
-            (Parser.Create())
-            (Codegen.Create module' builder context)
-        driver.Dispose()
-    | Error error -> failwith error
+do 
+    resultOf {
+        let! driver = Driver.Create module' engine
+        do! driver.Run (Parser.Create()) (Codegen.Create module' builder context)
+    } |> Result.throw
